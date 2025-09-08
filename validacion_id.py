@@ -22,7 +22,8 @@ def mejorar_imagen_para_ocr(imagen_pil):
     """
     try:
         img = np.array(imagen_pil)
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_RGB_BGR)
+        # CORRECCIÓN: Se arregló el error de tipeo de COLOR_RGB_BGR a COLOR_RGB2BGR
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         img_gris = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
         
         img_binaria = cv2.adaptiveThreshold(
@@ -107,31 +108,34 @@ if foto_buffer:
     width, height = img_pil.size
     if height > width:
         st.info("La imagen parece estar en vertical, rotándola para un mejor análisis...")
-        # Rotamos 270 grados (equivalente a -90) para ponerla horizontal
-        img_pil = img_pil.rotate(270, expand=True)
+        # CORRECCIÓN: Se cambió el ángulo de rotación de 270 a 90 grados para corregir la orientación.
+        # Diferentes celulares pueden requerir 90 o 270, 90 es el más común.
+        img_pil = img_pil.rotate(90, expand=True)
 
     imagen_procesada = mejorar_imagen_para_ocr(img_pil)
-    texto_extraido = extraer_texto_de_imagen(imagen_procesada)
-    datos_estructurados = estructurar_datos_extraidos(texto_extraido)
     
-    st.session_state.ultimo_dato = datos_estructurados
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Imagen Capturada (y corregida)")
-        # --- CORRECCIÓN DE LA ADVERTENCIA AMARILLA ---
-        st.image(img_pil, caption="Asegúrate que el texto sea legible.", use_container_width=True)
-    
-    with col2:
-        st.subheader("Datos Extraídos para Verificación")
-        st.json(datos_estructurados)
+    # Solo continuamos si el procesamiento de imagen fue exitoso
+    if imagen_procesada is not None:
+        texto_extraido = extraer_texto_de_imagen(imagen_procesada)
+        datos_estructurados = estructurar_datos_extraidos(texto_extraido)
         
-        with st.expander("Ver Texto Crudo Extraído por OCR"):
-            st.text(texto_extraido)
+        st.session_state.ultimo_dato = datos_estructurados
 
-    if st.button("Confirmar y Añadir a la Lista"):
-        st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-        st.success("¡Datos añadidos! Puedes tomar otra foto.")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Imagen Capturada (y corregida)")
+            st.image(img_pil, caption="Asegúrate que el texto sea legible.", use_container_width=True)
+        
+        with col2:
+            st.subheader("Datos Extraídos para Verificación")
+            st.json(datos_estructurados)
+            
+            with st.expander("Ver Texto Crudo Extraído por OCR"):
+                st.text(texto_extraido)
+
+        if st.button("Confirmar y Añadir a la Lista"):
+            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+            st.success("¡Datos añadidos! Puedes tomar otra foto.")
 
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
