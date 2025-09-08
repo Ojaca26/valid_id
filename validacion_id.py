@@ -21,17 +21,14 @@ def corregir_perspectiva_y_procesar(imagen_pil):
         open_cv_image = np.array(imagen_pil)
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         
-        # Guardar una copia para dibujar el contorno
         img_con_contorno = img.copy()
         
-        # 1. Pre-procesamiento para detección de bordes
         img_gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         img_blur = cv2.GaussianBlur(img_gris, (5, 5), 0)
-        img_canny = cv2.Canny(img_blur, 75, 200) # Ajuste de umbrales
+        img_canny = cv2.Canny(img_blur, 75, 200)
 
-        # 2. Encontrar contornos
         contornos, _ = cv2.findContours(img_canny, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:5] # Tomar los 5 más grandes
+        contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:5]
         
         carnet_contour = None
         for contorno in contornos:
@@ -41,18 +38,16 @@ def corregir_perspectiva_y_procesar(imagen_pil):
                 carnet_contour = approx
                 break
         
-        # --- MEJORA: DEPURACIÓN VISUAL ---
         if carnet_contour is not None:
             cv2.drawContours(img_con_contorno, [carnet_contour], -1, (0, 255, 0), 3)
             st.session_state.imagen_con_contorno = Image.fromarray(cv2.cvtColor(img_con_contorno, cv2.COLOR_BGR2RGB))
         else:
-            st.session_state.imagen_con_contorno = None # Limpiar si no se encontró
+            st.session_state.imagen_con_contorno = None
 
         if carnet_contour is None:
             st.warning("No se pudo detectar un contorno de 4 esquinas. Usando la imagen completa.")
             return mejorar_imagen_para_ocr_simple(imagen_pil)
 
-        # 3. Transformación de perspectiva
         puntos_origen = reordenar_puntos(carnet_contour.reshape(4, 2))
         
         ancho_a = np.sqrt(((puntos_origen[0][0] - puntos_origen[1][0])**2) + ((puntos_origen[0][1] - puntos_origen[1][1])**2))
@@ -68,9 +63,12 @@ def corregir_perspectiva_y_procesar(imagen_pil):
         matriz = cv2.getPerspectiveTransform(puntos_origen, puntos_destino)
         img_escaneada = cv2.warpPerspective(img, matriz, (ancho_max, alto_max))
         
-        # 4. Procesamiento final para OCR
+        # --- MEJORA: PROCESAMIENTO DE IMAGEN MÁS LIMPIO ---
         img_escaneada_gris = cv2.cvtColor(img_escaneada, cv2.COLOR_BGR2GRAY)
-        img_final = cv2.adaptiveThreshold(img_escaneada_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        # 1. Suavizar la imagen para eliminar el ruido
+        img_suavizada = cv2.medianBlur(img_escaneada_gris, 3)
+        # 2. Usar el umbral de Otsu para una binarización más limpia que adaptiveThreshold
+        _, img_final = cv2.threshold(img_suavizada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         
         return Image.fromarray(img_final)
         
@@ -80,7 +78,7 @@ def corregir_perspectiva_y_procesar(imagen_pil):
 
 def mejorar_imagen_para_ocr_simple(imagen_pil):
     img_array = np.array(imagen_pil.convert('L'))
-    img_binaria = cv2.adaptiveThreshold(img_array, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    _, img_binaria = cv2.threshold(img_array, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return Image.fromarray(img_binaria)
 
 def reordenar_puntos(puntos):
@@ -95,7 +93,8 @@ def reordenar_puntos(puntos):
 
 def extraer_texto_de_imagen(imagen_procesada):
     if imagen_procesada is None: return ""
-    config = '-l spa --psm 6'
+    # Se ajusta el modo de segmentación de página (PSM) a 3 para una detección automática más robusta.
+    config = '-l spa --psm 3'
     return pytesseract.image_to_string(imagen_procesada, config=config)
 
 def estructurar_datos_extraidos(texto_crudo):
@@ -140,7 +139,6 @@ st.set_page_config(page_title="Lector de Carnets OCR", layout="centered")
 st.title("🚀 Lector de Carnets con Visión Artificial")
 st.info("Consejo: Coloca el carnet sobre un fondo oscuro y de color uniforme para mejores resultados.")
 
-# Limpiar estado en cada recarga para una nueva sesión
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
 st.session_state.imagen_con_contorno = None
