@@ -21,16 +21,18 @@ def corregir_perspectiva_y_procesar(imagen_pil):
         open_cv_image = np.array(imagen_pil)
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         
+        # Guardar una copia para dibujar el contorno
+        img_con_contorno = img.copy()
+        
         # 1. Pre-procesamiento para detección de bordes
         img_gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         img_blur = cv2.GaussianBlur(img_gris, (5, 5), 0)
-        img_canny = cv2.Canny(img_blur, 50, 150)
+        img_canny = cv2.Canny(img_blur, 75, 200) # Ajuste de umbrales
 
         # 2. Encontrar contornos
         contornos, _ = cv2.findContours(img_canny, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:5] # Tomar los 5 más grandes
         
-        # Ordenar contornos por área y encontrar el más grande que sea un cuadrilátero
-        contornos = sorted(contornos, key=cv2.contourArea, reverse=True)
         carnet_contour = None
         for contorno in contornos:
             perimetro = cv2.arcLength(contorno, True)
@@ -39,16 +41,19 @@ def corregir_perspectiva_y_procesar(imagen_pil):
                 carnet_contour = approx
                 break
         
+        # --- MEJORA: DEPURACIÓN VISUAL ---
+        if carnet_contour is not None:
+            cv2.drawContours(img_con_contorno, [carnet_contour], -1, (0, 255, 0), 3)
+            st.session_state.imagen_con_contorno = Image.fromarray(cv2.cvtColor(img_con_contorno, cv2.COLOR_BGR2RGB))
+        else:
+            st.session_state.imagen_con_contorno = None # Limpiar si no se encontró
+
         if carnet_contour is None:
             st.warning("No se pudo detectar un contorno de 4 esquinas. Usando la imagen completa.")
-            # Si no se detecta, se procesa la imagen original como fallback
             return mejorar_imagen_para_ocr_simple(imagen_pil)
 
         # 3. Transformación de perspectiva
-        puntos_origen = np.float32(carnet_contour)
-        
-        # Reordenar los puntos para la transformación
-        puntos_origen = reordenar_puntos(puntos_origen.reshape(4, 2))
+        puntos_origen = reordenar_puntos(carnet_contour.reshape(4, 2))
         
         ancho_a = np.sqrt(((puntos_origen[0][0] - puntos_origen[1][0])**2) + ((puntos_origen[0][1] - puntos_origen[1][1])**2))
         ancho_b = np.sqrt(((puntos_origen[2][0] - puntos_origen[3][0])**2) + ((puntos_origen[2][1] - puntos_origen[3][1])**2))
@@ -65,24 +70,20 @@ def corregir_perspectiva_y_procesar(imagen_pil):
         
         # 4. Procesamiento final para OCR
         img_escaneada_gris = cv2.cvtColor(img_escaneada, cv2.COLOR_BGR2GRAY)
-        img_final = cv2.adaptiveThreshold(
-            img_escaneada_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
-        )
+        img_final = cv2.adaptiveThreshold(img_escaneada_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
         
-        return Image.fromarray(img_final) # Devolver como imagen PIL para mostrar
+        return Image.fromarray(img_final)
         
     except Exception as e:
         st.error(f"Error en el procesamiento de visión por computadora: {e}")
         return None
 
 def mejorar_imagen_para_ocr_simple(imagen_pil):
-    """Fallback si la detección de contornos falla."""
-    img_array = np.array(imagen_pil.convert('L')) # Convertir a escala de grises
+    img_array = np.array(imagen_pil.convert('L'))
     img_binaria = cv2.adaptiveThreshold(img_array, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
     return Image.fromarray(img_binaria)
 
 def reordenar_puntos(puntos):
-    """Reordena los 4 puntos del contorno: superior-izq, superior-der, inferior-der, inferior-izq."""
     rect = np.zeros((4, 2), dtype="float32")
     s = puntos.sum(axis=1)
     rect[0] = puntos[np.argmin(s)]
@@ -94,28 +95,43 @@ def reordenar_puntos(puntos):
 
 def extraer_texto_de_imagen(imagen_procesada):
     if imagen_procesada is None: return ""
-    config = '-l spa --psm 6' # PSM 6 asume un bloque de texto uniforme
+    config = '-l spa --psm 6'
     return pytesseract.image_to_string(imagen_procesada, config=config)
 
 def estructurar_datos_extraidos(texto_crudo):
-    """Usa Regex para encontrar y estructurar los datos."""
+    """
+    Usa Regex para encontrar y estructurar los datos, con un Plan B si falla.
+    """
     datos = {"Apellidos": "No encontrado", "Nombres": "No encontrado", "NUIP": "No encontrado"}
     
-    # Búsquedas más flexibles
-    match_apellidos = re.search(r'(?:Apellidos|Apelidos|Apelldos)\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
+    # --- Intento 1: Búsqueda por etiquetas ---
+    match_apellidos = re.search(r'(?:Apellidos|Apelidos)\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
     if match_apellidos:
-        # Limpiar y tomar las dos primeras palabras si hay más
-        nombres_completos = match_apellidos.group(1).strip().split('\n')[0]
-        datos["Apellidos"] = " ".join(nombres_completos.split()[:2])
+        datos["Apellidos"] = " ".join(match_apellidos.group(1).strip().split('\n')[0].split()[:2])
 
-    match_nombres = re.search(r'(?:Nombres|Nombes)\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
+    match_nombres = re.search(r'Nombres\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
     if match_nombres:
-        nombres_completos = match_nombres.group(1).strip().split('\n')[0]
-        datos["Nombres"] = " ".join(nombres_completos.split()[:2])
+        datos["Nombres"] = " ".join(match_nombres.group(1).strip().split('\n')[0].split()[:2])
 
     match_nuip = re.search(r'(\d{1,2}\.\d{3}\.\d{3})', texto_crudo)
     if match_nuip:
         datos["NUIP"] = match_nuip.group(1).strip()
+    
+    # --- MEJORA: PLAN B SI NO SE ENCONTRARON NOMBRES ---
+    if datos["Apellidos"] == "No encontrado" and datos["Nombres"] == "No encontrado":
+        lineas = [linea.strip() for linea in texto_crudo.split('\n') if linea.strip()]
+        candidatos_nombres = []
+        patron_nombre = re.compile(r'^[A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,2}$')
+        
+        for linea in lineas:
+            if patron_nombre.match(linea):
+                if "REPUBLICA" not in linea and "COLOMBIA" not in linea and "CIUDADANIA" not in linea:
+                    candidatos_nombres.append(linea)
+        
+        if len(candidatos_nombres) >= 2:
+            st.info("Búsqueda por etiquetas falló. Usando Plan B para encontrar nombres.")
+            datos["Apellidos"] = candidatos_nombres[0]
+            datos["Nombres"] = candidatos_nombres[1]
     
     return datos
 
@@ -124,8 +140,10 @@ st.set_page_config(page_title="Lector de Carnets OCR", layout="centered")
 st.title("🚀 Lector de Carnets con Visión Artificial")
 st.info("Consejo: Coloca el carnet sobre un fondo oscuro y de color uniforme para mejores resultados.")
 
+# Limpiar estado en cada recarga para una nueva sesión
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
+st.session_state.imagen_con_contorno = None
 
 foto_buffer = st.camera_input("Toma una foto del carnet (horizontalmente)")
 
@@ -133,19 +151,21 @@ if foto_buffer:
     st.info("Procesando imagen... esto puede tardar unos segundos.")
     img_pil = Image.open(foto_buffer)
 
-    # El nuevo pipeline de procesamiento
     imagen_corregida = corregir_perspectiva_y_procesar(img_pil)
+
+    if st.session_state.get('imagen_con_contorno'):
+        st.subheader("Paso 1: Detección de Bordes")
+        st.image(st.session_state.imagen_con_contorno, caption="El recuadro verde muestra lo que el algoritmo detectó como el carnet.", use_container_width=True)
 
     if imagen_corregida:
         texto_extraido = extraer_texto_de_imagen(imagen_corregida)
         datos_estructurados = estructurar_datos_extraidos(texto_extraido)
-        
         st.session_state.ultimo_dato = datos_estructurados
 
-        st.subheader("Imagen Corregida (Vista Plana)")
+        st.subheader("Paso 2: Imagen Corregida para Análisis")
         st.image(imagen_corregida, caption="Esta es la imagen que se analiza.", use_container_width=True)
         
-        st.subheader("Datos Extraídos para Verificación")
+        st.subheader("Paso 3: Datos Extraídos")
         st.json(datos_estructurados)
         
         with st.expander("Ver Texto Crudo Extraído por OCR"):
