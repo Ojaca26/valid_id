@@ -1,7 +1,5 @@
 import streamlit as st
 import cv2
-import pytesseract
-import re
 import pandas as pd
 from PIL import Image
 import numpy as np
@@ -14,11 +12,19 @@ ARCHIVO_EXCEL = 'datos_cedulas_colombia.xlsx'
 
 # Configurar la API de Gemini (la clave se toma de st.secrets)
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    GEMINI_CONFIGURADO = True
-except Exception as e:
-    st.error("Error al configurar la API de Gemini. Asegúrate de que tu clave de API esté en el archivo secrets.toml.")
+    # Intenta obtener la clave de los secretos de Streamlit
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if not api_key:
+        st.error("La clave GEMINI_API_KEY no se encontró en los secretos de Streamlit.")
+        GEMINI_CONFIGURADO = False
+    else:
+        genai.configure(api_key=api_key)
+        GEMINI_CONFIGURADO = True
+except Exception:
+    # Fallback para desarrollo local si st.secrets no está disponible
+    st.warning("No se pudieron cargar los secretos de Streamlit. Asegúrate de que tu clave de API esté configurada si estás en producción.")
     GEMINI_CONFIGURADO = False
+
 
 # --- FUNCIONES DE PROCESAMIENTO Y EXTRACCIÓN ---
 
@@ -96,31 +102,35 @@ def extraer_datos_con_gemini(imagenes_pil):
     # Modelo gemini-1.5-flash-latest es ideal para esto: rápido y eficiente
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
+    # --- PROMPT ACTUALIZADO CON TODOS LOS CAMPOS ---
     prompt_parts = [
         "Eres un experto en analizar cédulas de ciudadanía de Colombia, tanto el modelo antiguo (amarilla) como el nuevo (digital).",
         "Analiza la(s) siguiente(s) imagen(es) que pueden corresponder al anverso y reverso de una cédula.",
-        "Extrae la siguiente información y devuélvela en un formato JSON estricto:",
+        "Extrae la siguiente información y devuélvela en un formato JSON estricto. Presta mucha atención a las etiquetas y formatos:",
+        "- NUIP o NUMERO (siempre usa la etiqueta 'NUIP')",
         "- Apellidos",
         "- Nombres",
-        "- NUIP o NUMERO (usa la etiqueta 'NUIP' para ambos)",
-        "- Fecha de Nacimiento",
+        "- Fecha de nacimiento",
+        "- Lugar de nacimiento",
+        "- Estatura",
+        "- Sexo",
+        "- GS RH (Grupo Sanguíneo y RH)",
+        "- Fecha y lugar de expedición",
         "Si no encuentras un campo, usa el valor 'No encontrado'.",
-        "Ejemplo de respuesta: {\"Apellidos\": \"PEREZ GOMEZ\", \"Nombres\": \"JUAN CARLOS\", \"NUIP\": \"12.345.678\", \"Fecha de Nacimiento\": \"01 ENE 1990\"}",
+        "Ejemplo de respuesta: {\"NUIP\": \"12.345.678\", \"Apellidos\": \"PEREZ GOMEZ\", \"Nombres\": \"JUAN CARLOS\", \"Fecha de nacimiento\": \"01 ENE 1990\", \"Lugar de nacimiento\": \"BOGOTA D.C.\", \"Estatura\": \"1.75\", \"Sexo\": \"M\", \"GS RH\": \"O+\", \"Fecha y lugar de expedición\": \"01 ENE 2010, BOGOTA D.C.\"}",
     ]
     
-    # Añadir las imágenes al prompt
     for img in imagenes_pil:
         prompt_parts.append(img)
         
     try:
         response = model.generate_content(prompt_parts)
-        # Limpiar la respuesta para que sea un JSON válido
         json_text = response.text.strip().replace("```json", "").replace("```", "")
         return json.loads(json_text)
     except Exception as e:
         st.error(f"Error al contactar la API de Gemini: {e}")
-        st.text("Respuesta cruda de la API:")
-        st.text(response.text if 'response' in locals() else "No hubo respuesta.")
+        st.text("Respuesta cruda de la API (si está disponible):")
+        st.text(getattr(response, 'text', 'No hubo respuesta.'))
         return {"Error": "No se pudo procesar la respuesta de la IA."}
 
 # --- INTERFAZ DE STREAMLIT ---
@@ -143,14 +153,12 @@ if foto_anverso_buffer:
     
     imagenes_a_procesar = []
     
-    # Procesar Anverso
     img_anverso_pil = Image.open(foto_anverso_buffer)
     img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
     imagenes_a_procesar.append(img_anverso_corregida)
     st.subheader("Anverso Corregido")
     st.image(img_anverso_corregida, use_container_width=True)
 
-    # Procesar Reverso si existe
     if foto_reverso_buffer:
         img_reverso_pil = Image.open(foto_reverso_buffer)
         img_reverso_corregida = corregir_perspectiva(img_reverso_pil)
@@ -158,18 +166,22 @@ if foto_anverso_buffer:
         st.subheader("Reverso Corregido")
         st.image(img_reverso_corregida, use_container_width=True)
     
-    with st.spinner('La IA está analizando los documentos...'):
-        datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
-    
-    st.subheader("Resultado del Análisis de IA")
-    st.json(datos_estructurados)
-    
-    st.session_state.ultimo_dato = datos_estructurados
+    if GEMINI_CONFIGURADO:
+        with st.spinner('La IA está analizando los documentos...'):
+            datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
+        
+        st.subheader("Resultado del Análisis de IA")
+        st.json(datos_estructurados)
+        
+        st.session_state.ultimo_dato = datos_estructurados
 
-    if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
-        st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-        st.success("¡Datos añadidos!")
-        st.rerun()
+        if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
+            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+            st.success("¡Datos añadidos!")
+            st.rerun()
+    else:
+        st.error("La aplicación no puede funcionar porque la API de Gemini no está configurada.")
+
 
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
