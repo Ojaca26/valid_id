@@ -123,12 +123,27 @@ def extraer_datos_con_gemini(imagenes_pil):
         
     try:
         response = model.generate_content(prompt_parts)
+        # Limpiar la respuesta para que sea un JSON válido
         json_text = response.text.strip().replace("```json", "").replace("```", "")
-        return json.loads(json_text)
+        
+        # --- MEJORA DE ESTABILIDAD ---
+        # Verificar si la respuesta parece ser un JSON antes de intentar decodificarla
+        if json_text.startswith("{") and json_text.endswith("}"):
+            return json.loads(json_text)
+        else:
+            # Si no es JSON, es un mensaje de la IA (ej. imagen borrosa)
+            st.warning("La IA no pudo procesar la imagen y respondió con un mensaje:")
+            st.info(json_text)
+            return {"Error": "La IA no pudo extraer datos. Intenta con una foto más nítida."}
+            
+    except json.JSONDecodeError:
+        st.error("La respuesta de la IA no tuvo un formato JSON válido.")
+        st.text("Respuesta cruda de la API:")
+        st.text(response.text)
+        return {"Error": "Respuesta inválida de la IA."}
+
     except Exception as e:
         st.error(f"Error al contactar la API de Gemini: {e}")
-        st.text("Respuesta cruda de la API (si está disponible):")
-        st.text(getattr(response, 'text', 'No hubo respuesta.'))
         return {"Error": "No se pudo procesar la respuesta de la IA."}
 
 # --- INTERFAZ DE STREAMLIT ---
@@ -216,4 +231,3 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
