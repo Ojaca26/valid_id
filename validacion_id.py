@@ -122,7 +122,7 @@ def extraer_datos_con_gemini(imagenes_pil):
 
 # --- INTERFAZ DE STREAMLIT ---
 st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
-st.title("🚀 Lector de Cédulas con IA (Gemini)")
+st.title("🚀 Lector de Cédulas con IA")
 
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
@@ -210,3 +210,4 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
