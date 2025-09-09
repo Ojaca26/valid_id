@@ -6,17 +6,24 @@ import pandas as pd
 from PIL import Image
 import numpy as np
 import io
+import google.generativeai as genai
+import json
 
 # --- CONFIGURACIÓN ---
 ARCHIVO_EXCEL = 'datos_cedulas_colombia.xlsx'
 
-# --- FUNCIONES DE PROCESAMIENTO DE IMAGEN Y OCR ---
+# Configurar la API de Gemini (la clave se toma de st.secrets)
+try:
+    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    GEMINI_CONFIGURADO = True
+except Exception as e:
+    st.error("Error al configurar la API de Gemini. Asegúrate de que tu clave de API esté en el archivo secrets.toml.")
+    GEMINI_CONFIGURADO = False
 
-def corregir_perspectiva_y_procesar(imagen_pil):
-    """
-    Función principal de visión por computadora. Detecta los bordes del carnet,
-    corrige la perspectiva para obtener una vista plana y la procesa para OCR.
-    """
+# --- FUNCIONES DE PROCESAMIENTO Y EXTRACCIÓN ---
+
+def corregir_perspectiva(imagen_pil):
+    """Detecta los bordes del carnet y corrige la perspectiva."""
     try:
         open_cv_image = np.array(imagen_pil)
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
@@ -46,7 +53,7 @@ def corregir_perspectiva_y_procesar(imagen_pil):
 
         if carnet_contour is None:
             st.warning("No se pudo detectar un contorno de 4 esquinas. Usando la imagen completa.")
-            return mejorar_imagen_para_ocr_simple(imagen_pil)
+            return imagen_pil # Devolver la imagen original si no hay contorno
 
         puntos_origen = reordenar_puntos(carnet_contour.reshape(4, 2))
         
@@ -61,25 +68,13 @@ def corregir_perspectiva_y_procesar(imagen_pil):
         puntos_destino = np.float32([[0, 0], [ancho_max, 0], [ancho_max, alto_max], [0, alto_max]])
         
         matriz = cv2.getPerspectiveTransform(puntos_origen, puntos_destino)
-        img_escaneada = cv2.warpPerspective(img, matriz, (ancho_max, alto_max))
+        img_escaneada_bgr = cv2.warpPerspective(img, matriz, (ancho_max, alto_max))
         
-        # --- MEJORA: PROCESAMIENTO DE IMAGEN MÁS LIMPIO ---
-        img_escaneada_gris = cv2.cvtColor(img_escaneada, cv2.COLOR_BGR2GRAY)
-        # 1. Suavizar la imagen para eliminar el ruido
-        img_suavizada = cv2.medianBlur(img_escaneada_gris, 3)
-        # 2. Usar el umbral de Otsu para una binarización más limpia que adaptiveThreshold
-        _, img_final = cv2.threshold(img_suavizada, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        
-        return Image.fromarray(img_final)
+        return Image.fromarray(cv2.cvtColor(img_escaneada_bgr, cv2.COLOR_BGR2RGB))
         
     except Exception as e:
-        st.error(f"Error en el procesamiento de visión por computadora: {e}")
-        return None
-
-def mejorar_imagen_para_ocr_simple(imagen_pil):
-    img_array = np.array(imagen_pil.convert('L'))
-    _, img_binaria = cv2.threshold(img_array, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    return Image.fromarray(img_binaria)
+        st.error(f"Error en la corrección de perspectiva: {e}")
+        return imagen_pil # Devolver original en caso de error
 
 def reordenar_puntos(puntos):
     rect = np.zeros((4, 2), dtype="float32")
@@ -91,87 +86,90 @@ def reordenar_puntos(puntos):
     rect[3] = puntos[np.argmax(diff)]
     return rect
 
-def extraer_texto_de_imagen(imagen_procesada):
-    if imagen_procesada is None: return ""
-    # Se ajusta el modo de segmentación de página (PSM) a 3 para una detección automática más robusta.
-    config = '-l spa --psm 3'
-    return pytesseract.image_to_string(imagen_procesada, config=config)
-
-def estructurar_datos_extraidos(texto_crudo):
+def extraer_datos_con_gemini(imagenes_pil):
     """
-    Usa Regex para encontrar y estructurar los datos, con un Plan B si falla.
+    Envía una o dos imágenes a la API de Gemini Vision y pide la extracción de datos.
     """
-    datos = {"Apellidos": "No encontrado", "Nombres": "No encontrado", "NUIP": "No encontrado"}
-    
-    # --- Intento 1: Búsqueda por etiquetas ---
-    match_apellidos = re.search(r'(?:Apellidos|Apelidos)\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
-    if match_apellidos:
-        datos["Apellidos"] = " ".join(match_apellidos.group(1).strip().split('\n')[0].split()[:2])
+    if not GEMINI_CONFIGURADO:
+        return {"Error": "API de Gemini no configurada."}
 
-    match_nombres = re.search(r'Nombres\s*([A-ZÁÉÍÓÚÑ\s]+)', texto_crudo, re.IGNORECASE)
-    if match_nombres:
-        datos["Nombres"] = " ".join(match_nombres.group(1).strip().split('\n')[0].split()[:2])
-
-    match_nuip = re.search(r'(\d{1,2}\.\d{3}\.\d{3})', texto_crudo)
-    if match_nuip:
-        datos["NUIP"] = match_nuip.group(1).strip()
+    # Modelo gemini-1.5-flash-latest es ideal para esto: rápido y eficiente
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
-    # --- MEJORA: PLAN B SI NO SE ENCONTRARON NOMBRES ---
-    if datos["Apellidos"] == "No encontrado" and datos["Nombres"] == "No encontrado":
-        lineas = [linea.strip() for linea in texto_crudo.split('\n') if linea.strip()]
-        candidatos_nombres = []
-        patron_nombre = re.compile(r'^[A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,2}$')
-        
-        for linea in lineas:
-            if patron_nombre.match(linea):
-                if "REPUBLICA" not in linea and "COLOMBIA" not in linea and "CIUDADANIA" not in linea:
-                    candidatos_nombres.append(linea)
-        
-        if len(candidatos_nombres) >= 2:
-            st.info("Búsqueda por etiquetas falló. Usando Plan B para encontrar nombres.")
-            datos["Apellidos"] = candidatos_nombres[0]
-            datos["Nombres"] = candidatos_nombres[1]
+    prompt_parts = [
+        "Eres un experto en analizar cédulas de ciudadanía de Colombia, tanto el modelo antiguo (amarilla) como el nuevo (digital).",
+        "Analiza la(s) siguiente(s) imagen(es) que pueden corresponder al anverso y reverso de una cédula.",
+        "Extrae la siguiente información y devuélvela en un formato JSON estricto:",
+        "- Apellidos",
+        "- Nombres",
+        "- NUIP o NUMERO (usa la etiqueta 'NUIP' para ambos)",
+        "- Fecha de Nacimiento",
+        "Si no encuentras un campo, usa el valor 'No encontrado'.",
+        "Ejemplo de respuesta: {\"Apellidos\": \"PEREZ GOMEZ\", \"Nombres\": \"JUAN CARLOS\", \"NUIP\": \"12.345.678\", \"Fecha de Nacimiento\": \"01 ENE 1990\"}",
+    ]
     
-    return datos
+    # Añadir las imágenes al prompt
+    for img in imagenes_pil:
+        prompt_parts.append(img)
+        
+    try:
+        response = model.generate_content(prompt_parts)
+        # Limpiar la respuesta para que sea un JSON válido
+        json_text = response.text.strip().replace("```json", "").replace("```", "")
+        return json.loads(json_text)
+    except Exception as e:
+        st.error(f"Error al contactar la API de Gemini: {e}")
+        st.text("Respuesta cruda de la API:")
+        st.text(response.text if 'response' in locals() else "No hubo respuesta.")
+        return {"Error": "No se pudo procesar la respuesta de la IA."}
 
 # --- INTERFAZ DE STREAMLIT ---
-st.set_page_config(page_title="Lector de Carnets OCR", layout="centered")
-st.title("🚀 Lector de Carnets con Visión Artificial")
-st.info("Consejo: Coloca el carnet sobre un fondo oscuro y de color uniforme para mejores resultados.")
+st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
+st.title("🚀 Lector de Cédulas con IA (Gemini)")
+st.info("Toma fotos claras del anverso y, si es necesario, del reverso de la cédula.")
 
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
-st.session_state.imagen_con_contorno = None
 
-foto_buffer = st.camera_input("Toma una foto del carnet (horizontalmente)")
+col1, col2 = st.columns(2)
+with col1:
+    foto_anverso_buffer = st.camera_input("1. Toma una foto del **Anverso** (lado principal)")
 
-if foto_buffer:
-    st.info("Procesando imagen... esto puede tardar unos segundos.")
-    img_pil = Image.open(foto_buffer)
+with col2:
+    foto_reverso_buffer = st.camera_input("2. Toma una foto del **Reverso** (opcional, para cédula antigua)")
 
-    imagen_corregida = corregir_perspectiva_y_procesar(img_pil)
+if foto_anverso_buffer:
+    st.info("Procesando imagen(es)... esto puede tardar unos segundos.")
+    
+    imagenes_a_procesar = []
+    
+    # Procesar Anverso
+    img_anverso_pil = Image.open(foto_anverso_buffer)
+    img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
+    imagenes_a_procesar.append(img_anverso_corregida)
+    st.subheader("Anverso Corregido")
+    st.image(img_anverso_corregida, use_container_width=True)
 
-    if st.session_state.get('imagen_con_contorno'):
-        st.subheader("Paso 1: Detección de Bordes")
-        st.image(st.session_state.imagen_con_contorno, caption="El recuadro verde muestra lo que el algoritmo detectó como el carnet.", use_container_width=True)
+    # Procesar Reverso si existe
+    if foto_reverso_buffer:
+        img_reverso_pil = Image.open(foto_reverso_buffer)
+        img_reverso_corregida = corregir_perspectiva(img_reverso_pil)
+        imagenes_a_procesar.append(img_reverso_corregida)
+        st.subheader("Reverso Corregido")
+        st.image(img_reverso_corregida, use_container_width=True)
+    
+    with st.spinner('La IA está analizando los documentos...'):
+        datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
+    
+    st.subheader("Resultado del Análisis de IA")
+    st.json(datos_estructurados)
+    
+    st.session_state.ultimo_dato = datos_estructurados
 
-    if imagen_corregida:
-        texto_extraido = extraer_texto_de_imagen(imagen_corregida)
-        datos_estructurados = estructurar_datos_extraidos(texto_extraido)
-        st.session_state.ultimo_dato = datos_estructurados
-
-        st.subheader("Paso 2: Imagen Corregida para Análisis")
-        st.image(imagen_corregida, caption="Esta es la imagen que se analiza.", use_container_width=True)
-        
-        st.subheader("Paso 3: Datos Extraídos")
-        st.json(datos_estructurados)
-        
-        with st.expander("Ver Texto Crudo Extraído por OCR"):
-            st.text(texto_extraido if texto_extraido else "No se pudo extraer texto.")
-
-        if st.button("Confirmar y Añadir a la Lista"):
-            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-            st.success("¡Datos añadidos!")
+    if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
+        st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+        st.success("¡Datos añadidos!")
+        st.rerun()
 
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
