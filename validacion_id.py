@@ -13,7 +13,6 @@ ARCHIVO_EXCEL = 'datos_cedulas_colombia.xlsx'
 
 # Configurar la API de Gemini (la clave se toma de st.secrets)
 try:
-    # Intenta obtener la clave de los secretos de Streamlit
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
         st.error("La clave GEMINI_API_KEY no se encontró en los secretos de Streamlit.")
@@ -21,8 +20,7 @@ try:
     else:
         genai.configure(api_key=api_key)
         GEMINI_CONFIGURADO = True
-except Exception:
-    # Fallback para desarrollo local si st.secrets no está disponible
+except (AttributeError, KeyError):
     st.warning("No se pudieron cargar los secretos de Streamlit. Asegúrate de que tu clave de API esté configurada si estás en producción.")
     GEMINI_CONFIGURADO = False
 
@@ -35,8 +33,9 @@ def corregir_perspectiva(imagen_pil):
         open_cv_image = np.array(imagen_pil)
         img = cv2.cvtColor(open_cv_image, cv2.COLOR_RGB2BGR)
         
-        img_con_contorno = img.copy()
-        
+        total_image_area = img.shape[0] * img.shape[1]
+        min_area_ratio = 0.1 # El contorno debe ser al menos el 10% del área de la imagen
+
         img_gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         img_blur = cv2.GaussianBlur(img_gris, (5, 5), 0)
         img_canny = cv2.Canny(img_blur, 75, 200)
@@ -45,26 +44,16 @@ def corregir_perspectiva(imagen_pil):
         contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:5]
         
         carnet_contour = None
-        min_area_ratio = 0.1 # El contorno debe ser al menos el 10% del área de la imagen
-        total_image_area = img.shape[0] * img.shape[1]
-
         for contorno in contornos:
             perimetro = cv2.arcLength(contorno, True)
             approx = cv2.approxPolyDP(contorno, 0.02 * perimetro, True)
-            # MEJORA: Comprobar que el contorno sea un cuadrilátero Y que tenga un tamaño razonable
             if len(approx) == 4 and cv2.contourArea(approx) > min_area_ratio * total_image_area:
                 carnet_contour = approx
                 break
-        
-        if carnet_contour is not None:
-            cv2.drawContours(img_con_contorno, [carnet_contour], -1, (0, 255, 0), 3)
-            st.session_state.imagen_con_contorno = Image.fromarray(cv2.cvtColor(img_con_contorno, cv2.COLOR_BGR2RGB))
-        else:
-            st.session_state.imagen_con_contorno = None
 
         if carnet_contour is None:
-            st.warning("No se pudo detectar un contorno de 4 esquinas. Usando la imagen completa.")
-            return imagen_pil # Devolver la imagen original si no hay contorno
+            st.warning("No se pudo detectar un contorno claro. Usando la imagen completa.")
+            return imagen_pil
 
         puntos_origen = reordenar_puntos(carnet_contour.reshape(4, 2))
         
@@ -85,7 +74,7 @@ def corregir_perspectiva(imagen_pil):
         
     except Exception as e:
         st.error(f"Error en la corrección de perspectiva: {e}")
-        return imagen_pil # Devolver original en caso de error
+        return imagen_pil
 
 def reordenar_puntos(puntos):
     rect = np.zeros((4, 2), dtype="float32")
@@ -98,31 +87,21 @@ def reordenar_puntos(puntos):
     return rect
 
 def extraer_datos_con_gemini(imagenes_pil):
-    """
-    Envía una o dos imágenes a la API de Gemini Vision y pide la extracción de datos.
-    """
+    """Envía una o dos imágenes a la API de Gemini Vision y pide la extracción de datos."""
     if not GEMINI_CONFIGURADO:
         return {"Error": "API de Gemini no configurada."}
 
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
     prompt_parts = [
-        "Eres un experto en analizar cédulas de ciudadanía de Colombia, tanto el modelo antiguo (amarilla) como el nuevo (digital).",
+        "Eres un experto en analizar cédulas de ciudadanía de Colombia.",
         "Analiza la(s) siguiente(s) imagen(es).",
         "Primero, determina si la imagen principal es una Cédula de Ciudadanía de Colombia. Luego, extrae la información y devuélvela en un formato JSON estricto con los siguientes campos:",
-        "- es_cedula_colombiana (un booleano: true si estás seguro que es una cédula de Colombia, false si es otro documento o no estás seguro).",
-        "- NUIP o NUMERO (siempre usa la etiqueta 'NUIP')",
-        "- Apellidos",
-        "- Nombres",
-        "- Fecha de nacimiento",
-        "- Lugar de nacimiento",
-        "- Estatura",
-        "- Sexo",
-        "- GS RH (Grupo Sanguíneo y RH)",
-        "- Fecha y lugar de expedición",
+        "- es_cedula_colombiana (booleano: true si es una cédula de Colombia, false si no).",
+        "- NUIP", "- Apellidos", "- Nombres", "- Fecha de nacimiento", "- Lugar de nacimiento",
+        "- Estatura", "- Sexo", "- GS RH", "- Fecha y lugar de expedición",
         "Si no es una cédula de Colombia, solo devuelve {\"es_cedula_colombiana\": false}.",
-        "Si es una cédula válida pero no encuentras un campo, usa el valor 'No encontrado' para ese campo.",
-        "Ejemplo de respuesta para una cédula válida: {\"es_cedula_colombiana\": true, \"NUIP\": \"12.345.678\", \"Apellidos\": \"PEREZ GOMEZ\", ...}",
+        "Si es una cédula válida pero no encuentras un campo, usa el valor 'No encontrado'.",
     ]
     
     for img in imagenes_pil:
@@ -130,101 +109,93 @@ def extraer_datos_con_gemini(imagenes_pil):
         
     try:
         response = model.generate_content(prompt_parts)
-        
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        
         if match:
-            json_text = match.group(0)
-            return json.loads(json_text)
+            return json.loads(match.group(0))
         else:
-            st.warning("La IA no pudo procesar la imagen y respondió con un mensaje:")
+            st.warning("La IA respondió con un mensaje en lugar de datos:")
             st.info(response.text)
-            return {"Error": "La IA no pudo extraer datos. Intenta con una foto más nítida.", "es_cedula_colombiana": False}
-            
-    except json.JSONDecodeError:
-        st.error("La respuesta de la IA no tuvo un formato JSON válido.")
-        st.text("Respuesta cruda de la API:")
-        st.text(response.text)
-        return {"Error": "Respuesta inválida de la IA.", "es_cedula_colombiana": False}
-
+            return {"Error": "Respuesta no válida de la IA.", "es_cedula_colombiana": False}
     except Exception as e:
-        st.error(f"Error al contactar la API de Gemini: {e}")
-        return {"Error": "No se pudo procesar la respuesta de la IA.", "es_cedula_colombiana": False}
+        st.error(f"Error al contactar o procesar la respuesta de la API de Gemini: {e}")
+        return {"Error": "Fallo en la comunicación con la IA.", "es_cedula_colombiana": False}
 
 # --- INTERFAZ DE STREAMLIT ---
 st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
 st.title("🚀 Lector de Cédulas con IA (Gemini)")
-st.info("Toma fotos claras del anverso y, si es necesario, del reverso de la cédula.")
 
-# Inicializar estado de sesión
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
-if 'run_id' not in st.session_state:
-    st.session_state.run_id = 0
+if 'ultimo_dato' not in st.session_state:
+    st.session_state.ultimo_dato = None
 
-def reset_scan():
-    """Incrementa el run_id para forzar el reseteo de los widgets de cámara."""
-    st.session_state.run_id += 1
+st.info("Puedes tomar una foto en vivo o subir una imagen desde tu galería para mayor precisión.")
 
-# Usar columnas para los widgets de la cámara
-col1, col2 = st.columns(2)
-with col1:
-    foto_anverso_buffer = st.camera_input(
-        "1. Toma una foto del **Anverso** (lado principal)", 
-        key=f"anverso_{st.session_state.run_id}"
-    )
+tab1, tab2 = st.tabs(["📸 Tomar Foto", "⬆️ Subir Foto"])
 
-with col2:
-    foto_reverso_buffer = st.camera_input(
-        "2. Toma una foto del **Reverso** (opcional, para cédula antigua)",
-        key=f"reverso_{st.session_state.run_id}"
-    )
+foto_anverso_buffer = None
+foto_reverso_buffer = None
+
+with tab1:
+    st.write("Usa la cámara en vivo. Puede que no funcione en todos los navegadores móviles.")
+    cam_col1, cam_col2 = st.columns(2)
+    with cam_col1:
+        foto_anverso_buffer_cam = st.camera_input("1. Anverso (lado principal)", key="cam_anverso")
+    with cam_col2:
+        foto_reverso_buffer_cam = st.camera_input("2. Reverso (opcional)", key="cam_reverso")
+    if foto_anverso_buffer_cam:
+        foto_anverso_buffer = foto_anverso_buffer_cam
+        if foto_reverso_buffer_cam:
+            foto_reverso_buffer = foto_reverso_buffer_cam
+
+with tab2:
+    st.write("Sube imágenes desde tu dispositivo para obtener la máxima calidad.")
+    up_col1, up_col2 = st.columns(2)
+    with up_col1:
+        foto_anverso_buffer_upload = st.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
+    with up_col2:
+        foto_reverso_buffer_upload = st.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
+    if foto_anverso_buffer_upload:
+        foto_anverso_buffer = foto_anverso_buffer_upload
+        if foto_reverso_buffer_upload:
+            foto_reverso_buffer = foto_reverso_buffer_upload
 
 if foto_anverso_buffer:
-    st.info("Procesando imagen(es)... esto puede tardar unos segundos.")
+    st.info("Procesando imagen(es)...")
     
     imagenes_a_procesar = []
     
     img_anverso_pil = Image.open(foto_anverso_buffer)
     img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
     imagenes_a_procesar.append(img_anverso_corregida)
-    st.subheader("Anverso Corregido")
-    st.image(img_anverso_corregida, use_container_width=True)
 
     if foto_reverso_buffer:
         img_reverso_pil = Image.open(foto_reverso_buffer)
         img_reverso_corregida = corregir_perspectiva(img_reverso_pil)
         imagenes_a_procesar.append(img_reverso_corregida)
-        st.subheader("Reverso Corregido")
-        st.image(img_reverso_corregida, use_container_width=True)
     
     if GEMINI_CONFIGURADO:
         with st.spinner('La IA está analizando los documentos...'):
             datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
         
-        # --- LÓGICA DE VALIDACIÓN ---
+        st.session_state.ultimo_dato = datos_estructurados
+        
         if datos_estructurados.get("es_cedula_colombiana"):
             st.subheader("Resultado del Análisis de IA")
             st.json(datos_estructurados)
-            st.session_state.ultimo_dato = datos_estructurados
-
-            action_col1, action_col2 = st.columns(2)
-            with action_col1:
-                if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
-                    st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-                    st.success("¡Datos añadidos!")
-            
-            with action_col2:
-                st.button("📸 Leer Nuevo Documento", on_click=reset_scan)
         else:
             st.error("EL DOCUMENTO ANALIZADO NO PARECE SER UNA CÉDULA DE CIUDADANÍA DE COLOMBIA.")
-            st.json(datos_estructurados) # Muestra el resultado para depuración
-            st.button("📸 Leer Nuevo Documento", on_click=reset_scan)
-            
-    else:
-        st.error("La aplicación no puede funcionar porque la API de Gemini no está configurada.")
+            if "Error" in datos_estructurados:
+                st.json(datos_estructurados)
 
-# Mostrar la tabla de registros siempre, fuera del bloque if
+if st.session_state.ultimo_dato:
+    if st.session_state.ultimo_dato.get("es_cedula_colombiana"):
+        if st.button("Confirmar y Añadir a la Lista"):
+            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+            st.session_state.ultimo_dato = None
+            st.success("¡Datos añadidos!")
+            st.rerun()
+
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
     df = pd.DataFrame(st.session_state.datos_capturados)
