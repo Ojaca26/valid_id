@@ -99,10 +99,8 @@ def extraer_datos_con_gemini(imagenes_pil):
     if not GEMINI_CONFIGURADO:
         return {"Error": "API de Gemini no configurada."}
 
-    # Modelo gemini-1.5-flash-latest es ideal para esto: rápido y eficiente
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     
-    # --- PROMPT ACTUALIZADO CON TODOS LOS CAMPOS ---
     prompt_parts = [
         "Eres un experto en analizar cédulas de ciudadanía de Colombia, tanto el modelo antiguo (amarilla) como el nuevo (digital).",
         "Analiza la(s) siguiente(s) imagen(es) que pueden corresponder al anverso y reverso de una cédula.",
@@ -138,15 +136,29 @@ st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
 st.title("🚀 Lector de Cédulas con IA (Gemini)")
 st.info("Toma fotos claras del anverso y, si es necesario, del reverso de la cédula.")
 
+# Inicializar estado de sesión
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
+if 'run_id' not in st.session_state:
+    st.session_state.run_id = 0
 
+def reset_scan():
+    """Incrementa el run_id para forzar el reseteo de los widgets de cámara."""
+    st.session_state.run_id += 1
+
+# Usar columnas para los widgets de la cámara
 col1, col2 = st.columns(2)
 with col1:
-    foto_anverso_buffer = st.camera_input("1. Toma una foto del **Anverso** (lado principal)")
+    foto_anverso_buffer = st.camera_input(
+        "1. Toma una foto del **Anverso** (lado principal)", 
+        key=f"anverso_{st.session_state.run_id}"
+    )
 
 with col2:
-    foto_reverso_buffer = st.camera_input("2. Toma una foto del **Reverso** (opcional, para cédula antigua)")
+    foto_reverso_buffer = st.camera_input(
+        "2. Toma una foto del **Reverso** (opcional, para cédula antigua)",
+        key=f"reverso_{st.session_state.run_id}"
+    )
 
 if foto_anverso_buffer:
     st.info("Procesando imagen(es)... esto puede tardar unos segundos.")
@@ -175,14 +187,21 @@ if foto_anverso_buffer:
         
         st.session_state.ultimo_dato = datos_estructurados
 
-        if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
-            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-            st.success("¡Datos añadidos!")
-            st.rerun()
+        # --- Botones de Acción ---
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
+                st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+                st.success("¡Datos añadidos!")
+                # No se resetea aquí, para que el usuario pueda ver los datos.
+        
+        with action_col2:
+            st.button("📸 Leer Nuevo Documento", on_click=reset_scan)
+            
     else:
         st.error("La aplicación no puede funcionar porque la API de Gemini no está configurada.")
 
-
+# Mostrar la tabla de registros siempre, fuera del bloque if
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
     df = pd.DataFrame(st.session_state.datos_capturados)
@@ -197,3 +216,4 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
