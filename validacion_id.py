@@ -6,6 +6,7 @@ import numpy as np
 import io
 import google.generativeai as genai
 import json
+import re
 
 # --- CONFIGURACIÓN ---
 ARCHIVO_EXCEL = 'datos_cedulas_colombia.xlsx'
@@ -44,10 +45,14 @@ def corregir_perspectiva(imagen_pil):
         contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:5]
         
         carnet_contour = None
+        min_area_ratio = 0.1 # El contorno debe ser al menos el 10% del área de la imagen
+        total_image_area = img.shape[0] * img.shape[1]
+
         for contorno in contornos:
             perimetro = cv2.arcLength(contorno, True)
             approx = cv2.approxPolyDP(contorno, 0.02 * perimetro, True)
-            if len(approx) == 4:
+            # MEJORA: Comprobar que el contorno sea un cuadrilátero Y que tenga un tamaño razonable
+            if len(approx) == 4 and cv2.contourArea(approx) > min_area_ratio * total_image_area:
                 carnet_contour = approx
                 break
         
@@ -123,17 +128,17 @@ def extraer_datos_con_gemini(imagenes_pil):
         
     try:
         response = model.generate_content(prompt_parts)
-        # Limpiar la respuesta para que sea un JSON válido
-        json_text = response.text.strip().replace("```json", "").replace("```", "")
         
-        # --- MEJORA DE ESTABILIDAD ---
-        # Verificar si la respuesta parece ser un JSON antes de intentar decodificarla
-        if json_text.startswith("{") and json_text.endswith("}"):
+        # MEJORA: Usar regex para encontrar el bloque JSON de forma más robusta
+        match = re.search(r'\{.*\}', response.text, re.DOTALL)
+        
+        if match:
+            json_text = match.group(0)
             return json.loads(json_text)
         else:
-            # Si no es JSON, es un mensaje de la IA (ej. imagen borrosa)
+            # Si no se encuentra JSON, es un mensaje de la IA (ej. imagen borrosa)
             st.warning("La IA no pudo procesar la imagen y respondió con un mensaje:")
-            st.info(json_text)
+            st.info(response.text)
             return {"Error": "La IA no pudo extraer datos. Intenta con una foto más nítida."}
             
     except json.JSONDecodeError:
