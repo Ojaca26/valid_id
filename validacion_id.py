@@ -124,116 +124,110 @@ def extraer_datos_con_gemini(imagenes_pil):
 st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
 st.title("🚀 Lector de Cédulas con IA (Gemini)")
 
+# --- GESTIÓN DE ESTADO ---
+if 'stage' not in st.session_state:
+    st.session_state.stage = 'inicio'
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
-if 'ultimo_dato' not in st.session_state:
-    st.session_state.ultimo_dato = None
-if 'anverso_cam' not in st.session_state:
-    st.session_state.anverso_cam = None
-if 'reverso_cam' not in st.session_state:
-    st.session_state.reverso_cam = None
-if 'anverso_up' not in st.session_state:
-    st.session_state.anverso_up = None
-if 'reverso_up' not in st.session_state:
-    st.session_state.reverso_up = None
+if 'anverso_buffer' not in st.session_state:
+    st.session_state.anverso_buffer = None
+if 'reverso_buffer' not in st.session_state:
+    st.session_state.reverso_buffer = None
+
+def limpiar_y_empezar_de_nuevo():
+    st.session_state.stage = 'inicio'
+    st.session_state.anverso_buffer = None
+    st.session_state.reverso_buffer = None
 
 st.info("Puedes tomar una foto en vivo o subir una imagen desde tu galería para mayor precisión.")
 
 tab1, tab2 = st.tabs(["📸 Tomar Foto (Secuencial)", "⬆️ Subir Foto (Múltiple)"])
 
-foto_anverso_buffer = None
-foto_reverso_buffer = None
-
+# --- Lógica de la Pestaña 1: Tomar Foto ---
 with tab1:
     st.write("Sigue los pasos para capturar las imágenes. Solo se activa una cámara a la vez.")
     
-    if st.session_state.anverso_cam is None:
-        foto_anverso_buffer_cam = st.camera_input("Paso 1: Toma una foto del **Anverso**", key="cam_anverso")
-        if foto_anverso_buffer_cam:
-            st.session_state.anverso_cam = foto_anverso_buffer_cam
-            st.rerun() # Recargar para mostrar el siguiente paso
-    else:
-        st.success("✔️ Paso 1: Anverso capturado.")
-        st.image(st.session_state.anverso_cam)
-        foto_reverso_buffer_cam = st.camera_input("Paso 2: Toma una foto del **Reverso** (opcional)", key="cam_reverso")
-        if foto_reverso_buffer_cam:
-            st.session_state.reverso_cam = foto_reverso_buffer_cam
+    # Etapa 1: Capturar Anverso
+    if st.session_state.stage == 'inicio':
+        foto_anverso_cam = st.camera_input("Paso 1: Toma una foto del **Anverso**", key="cam_anverso")
+        if foto_anverso_cam:
+            st.session_state.anverso_buffer = foto_anverso_cam
+            st.session_state.stage = 'anverso_listo'
             st.rerun()
 
-    if st.session_state.anverso_cam:
-        foto_anverso_buffer = st.session_state.anverso_cam
-    if st.session_state.reverso_cam:
-        foto_reverso_buffer = st.session_state.reverso_cam
-        st.success("✔️ Paso 2: Reverso capturado.")
-        st.image(st.session_state.reverso_cam)
+    # Etapa 2: Capturar Reverso
+    elif st.session_state.stage == 'anverso_listo':
+        st.success("✔️ Paso 1: Anverso capturado.")
+        st.image(st.session_state.anverso_buffer)
+        foto_reverso_cam = st.camera_input("Paso 2: Toma una foto del **Reverso** (opcional)", key="cam_reverso")
+        if foto_reverso_cam:
+            st.session_state.reverso_buffer = foto_reverso_cam
+            st.session_state.stage = 'listo_para_procesar'
+            st.rerun()
+        
+        # Botón para procesar solo con el anverso
+        if st.button("Procesar solo con Anverso"):
+            st.session_state.stage = 'listo_para_procesar'
+            st.rerun()
 
+# --- Lógica de la Pestaña 2: Subir Foto ---
 with tab2:
     st.write("Sube imágenes desde tu dispositivo para obtener la máxima calidad.")
     up_col1, up_col2 = st.columns(2)
-    with up_col1:
-        st.session_state.anverso_up = st.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
-    with up_col2:
-        st.session_state.reverso_up = st.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
+    anverso_up = up_col1.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
+    reverso_up = up_col2.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
     
-    if st.session_state.anverso_up:
-        foto_anverso_buffer = st.session_state.anverso_up
-    if st.session_state.reverso_up:
-        foto_reverso_buffer = st.session_state.reverso_up
+    if anverso_up:
+        # Si se sube un archivo, sobreescribe el estado de la cámara y procesa
+        st.session_state.anverso_buffer = anverso_up
+        st.session_state.reverso_buffer = reverso_up
+        st.session_state.stage = 'listo_para_procesar'
 
 
-# --- Lógica de Procesamiento (se ejecuta si hay al menos una foto de anverso) ---
-if foto_anverso_buffer:
+# --- Lógica de Procesamiento Centralizada ---
+if st.session_state.stage == 'listo_para_procesar':
     st.info("Procesando imagen(es)...")
-    
     imagenes_a_procesar = []
     
-    img_anverso_pil = Image.open(foto_anverso_buffer)
-    img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
-    imagenes_a_procesar.append(img_anverso_corregida)
+    if st.session_state.anverso_buffer:
+        img_anverso_pil = Image.open(st.session_state.anverso_buffer)
+        img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
+        imagenes_a_procesar.append(img_anverso_corregida)
 
-    if foto_reverso_buffer:
-        img_reverso_pil = Image.open(foto_reverso_buffer)
+    if st.session_state.reverso_buffer:
+        img_reverso_pil = Image.open(st.session_state.reverso_buffer)
         img_reverso_corregida = corregir_perspectiva(img_reverso_pil)
         imagenes_a_procesar.append(img_reverso_corregida)
     
-    if GEMINI_CONFIGURADO:
+    if GEMINI_CONFIGURADO and imagenes_a_procesar:
         with st.spinner('La IA está analizando los documentos...'):
             datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
         
         st.session_state.ultimo_dato = datos_estructurados
+        st.session_state.stage = 'resultados_listos' # Transición a la etapa de resultados
+        st.rerun()
+
+# --- Mostrar Resultados y Acciones ---
+if st.session_state.stage == 'resultados_listos':
+    datos = st.session_state.get('ultimo_dato', {})
+    
+    if datos.get("es_cedula_colombiana"):
+        st.subheader("Resultado del Análisis de IA")
+        st.json(datos)
         
-        if datos_estructurados.get("es_cedula_colombiana"):
-            st.subheader("Resultado del Análisis de IA")
-            st.json(datos_estructurados)
-        else:
-            st.error("EL DOCUMENTO ANALIZADO NO PARECE SER UNA CÉDULA DE CIUDADANÍA DE COLOMBIA.")
-            if "Error" in datos_estructurados:
-                st.json(datos_estructurados)
-
-# Botones de acción y tabla de resultados
-if st.session_state.ultimo_dato:
-    col_btn1, col_btn2 = st.columns(2)
-    with col_btn1:
-        if st.session_state.ultimo_dato.get("es_cedula_colombiana"):
-            if st.button("Confirmar y Añadir a la Lista"):
-                st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-                st.session_state.ultimo_dato = None
-                st.session_state.anverso_cam = None
-                st.session_state.reverso_cam = None
-                st.session_state.anverso_up = None
-                st.session_state.reverso_up = None
-                st.success("¡Datos añadidos!")
-                st.rerun()
-
-    with col_btn2:
-        if st.button("Limpiar y Empezar de Nuevo"):
-            st.session_state.ultimo_dato = None
-            st.session_state.anverso_cam = None
-            st.session_state.reverso_cam = None
-            st.session_state.anverso_up = None
-            st.session_state.reverso_up = None
+        if st.button("Confirmar y Añadir a la Lista"):
+            st.session_state.datos_capturados.append(datos)
+            st.success("¡Datos añadidos!")
+            limpiar_y_empezar_de_nuevo()
             st.rerun()
+    else:
+        st.error("EL DOCUMENTO ANALIZADO NO PARECE SER UNA CÉDULA DE CIUDADANÍA DE COLOMBIA.")
+        if "Error" in datos:
+            st.json(datos)
+    
+    st.button("Limpiar y Empezar de Nuevo", on_click=limpiar_y_empezar_de_nuevo)
 
+# --- Mostrar la tabla de registros ---
 if st.session_state.datos_capturados:
     st.subheader("Registros Capturados")
     df = pd.DataFrame(st.session_state.datos_capturados)
