@@ -122,44 +122,66 @@ def extraer_datos_con_gemini(imagenes_pil):
 
 # --- INTERFAZ DE STREAMLIT ---
 st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
-st.title("🚀 Lector de Cédulas con IA")
+st.title("🚀 Lector de Cédulas con IA (Gemini)")
 
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
 if 'ultimo_dato' not in st.session_state:
     st.session_state.ultimo_dato = None
+if 'anverso_cam' not in st.session_state:
+    st.session_state.anverso_cam = None
+if 'reverso_cam' not in st.session_state:
+    st.session_state.reverso_cam = None
+if 'anverso_up' not in st.session_state:
+    st.session_state.anverso_up = None
+if 'reverso_up' not in st.session_state:
+    st.session_state.reverso_up = None
 
 st.info("Puedes tomar una foto en vivo o subir una imagen desde tu galería para mayor precisión.")
 
-tab1, tab2 = st.tabs(["📸 Tomar Foto", "⬆️ Subir Foto"])
+tab1, tab2 = st.tabs(["📸 Tomar Foto (Secuencial)", "⬆️ Subir Foto (Múltiple)"])
 
 foto_anverso_buffer = None
 foto_reverso_buffer = None
 
 with tab1:
-    st.write("Usa la cámara en vivo. Puede que no funcione en todos los navegadores móviles.")
-    cam_col1, cam_col2 = st.columns(2)
-    with cam_col1:
-        foto_anverso_buffer_cam = st.camera_input("1. Anverso (lado principal)", key="cam_anverso")
-    with cam_col2:
-        foto_reverso_buffer_cam = st.camera_input("2. Reverso (opcional)", key="cam_reverso")
-    if foto_anverso_buffer_cam:
-        foto_anverso_buffer = foto_anverso_buffer_cam
+    st.write("Sigue los pasos para capturar las imágenes. Solo se activa una cámara a la vez.")
+    
+    if st.session_state.anverso_cam is None:
+        foto_anverso_buffer_cam = st.camera_input("Paso 1: Toma una foto del **Anverso**", key="cam_anverso")
+        if foto_anverso_buffer_cam:
+            st.session_state.anverso_cam = foto_anverso_buffer_cam
+            st.rerun() # Recargar para mostrar el siguiente paso
+    else:
+        st.success("✔️ Paso 1: Anverso capturado.")
+        st.image(st.session_state.anverso_cam)
+        foto_reverso_buffer_cam = st.camera_input("Paso 2: Toma una foto del **Reverso** (opcional)", key="cam_reverso")
         if foto_reverso_buffer_cam:
-            foto_reverso_buffer = foto_reverso_buffer_cam
+            st.session_state.reverso_cam = foto_reverso_buffer_cam
+            st.rerun()
+
+    if st.session_state.anverso_cam:
+        foto_anverso_buffer = st.session_state.anverso_cam
+    if st.session_state.reverso_cam:
+        foto_reverso_buffer = st.session_state.reverso_cam
+        st.success("✔️ Paso 2: Reverso capturado.")
+        st.image(st.session_state.reverso_cam)
 
 with tab2:
     st.write("Sube imágenes desde tu dispositivo para obtener la máxima calidad.")
     up_col1, up_col2 = st.columns(2)
     with up_col1:
-        foto_anverso_buffer_upload = st.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
+        st.session_state.anverso_up = st.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
     with up_col2:
-        foto_reverso_buffer_upload = st.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
-    if foto_anverso_buffer_upload:
-        foto_anverso_buffer = foto_anverso_buffer_upload
-        if foto_reverso_buffer_upload:
-            foto_reverso_buffer = foto_reverso_buffer_upload
+        st.session_state.reverso_up = st.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
+    
+    if st.session_state.anverso_up:
+        foto_anverso_buffer = st.session_state.anverso_up
+    if st.session_state.reverso_up:
+        foto_reverso_buffer = st.session_state.reverso_up
 
+
+# --- Lógica de Procesamiento (se ejecuta si hay al menos una foto de anverso) ---
 if foto_anverso_buffer:
     st.info("Procesando imagen(es)...")
     
@@ -188,12 +210,28 @@ if foto_anverso_buffer:
             if "Error" in datos_estructurados:
                 st.json(datos_estructurados)
 
+# Botones de acción y tabla de resultados
 if st.session_state.ultimo_dato:
-    if st.session_state.ultimo_dato.get("es_cedula_colombiana"):
-        if st.button("Confirmar y Añadir a la Lista"):
-            st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.session_state.ultimo_dato.get("es_cedula_colombiana"):
+            if st.button("Confirmar y Añadir a la Lista"):
+                st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+                st.session_state.ultimo_dato = None
+                st.session_state.anverso_cam = None
+                st.session_state.reverso_cam = None
+                st.session_state.anverso_up = None
+                st.session_state.reverso_up = None
+                st.success("¡Datos añadidos!")
+                st.rerun()
+
+    with col_btn2:
+        if st.button("Limpiar y Empezar de Nuevo"):
             st.session_state.ultimo_dato = None
-            st.success("¡Datos añadidos!")
+            st.session_state.anverso_cam = None
+            st.session_state.reverso_cam = None
+            st.session_state.anverso_up = None
+            st.session_state.reverso_up = None
             st.rerun()
 
 if st.session_state.datos_capturados:
@@ -210,4 +248,3 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
