@@ -108,8 +108,9 @@ def extraer_datos_con_gemini(imagenes_pil):
     
     prompt_parts = [
         "Eres un experto en analizar cédulas de ciudadanía de Colombia, tanto el modelo antiguo (amarilla) como el nuevo (digital).",
-        "Analiza la(s) siguiente(s) imagen(es) que pueden corresponder al anverso y reverso de una cédula.",
-        "Extrae la siguiente información y devuélvela en un formato JSON estricto. Presta mucha atención a las etiquetas y formatos:",
+        "Analiza la(s) siguiente(s) imagen(es).",
+        "Primero, determina si la imagen principal es una Cédula de Ciudadanía de Colombia. Luego, extrae la información y devuélvela en un formato JSON estricto con los siguientes campos:",
+        "- es_cedula_colombiana (un booleano: true si estás seguro que es una cédula de Colombia, false si es otro documento o no estás seguro).",
         "- NUIP o NUMERO (siempre usa la etiqueta 'NUIP')",
         "- Apellidos",
         "- Nombres",
@@ -119,8 +120,9 @@ def extraer_datos_con_gemini(imagenes_pil):
         "- Sexo",
         "- GS RH (Grupo Sanguíneo y RH)",
         "- Fecha y lugar de expedición",
-        "Si no encuentras un campo, usa el valor 'No encontrado'.",
-        "Ejemplo de respuesta: {\"NUIP\": \"12.345.678\", \"Apellidos\": \"PEREZ GOMEZ\", \"Nombres\": \"JUAN CARLOS\", \"Fecha de nacimiento\": \"01 ENE 1990\", \"Lugar de nacimiento\": \"BOGOTA D.C.\", \"Estatura\": \"1.75\", \"Sexo\": \"M\", \"GS RH\": \"O+\", \"Fecha y lugar de expedición\": \"01 ENE 2010, BOGOTA D.C.\"}",
+        "Si no es una cédula de Colombia, solo devuelve {\"es_cedula_colombiana\": false}.",
+        "Si es una cédula válida pero no encuentras un campo, usa el valor 'No encontrado' para ese campo.",
+        "Ejemplo de respuesta para una cédula válida: {\"es_cedula_colombiana\": true, \"NUIP\": \"12.345.678\", \"Apellidos\": \"PEREZ GOMEZ\", ...}",
     ]
     
     for img in imagenes_pil:
@@ -129,27 +131,25 @@ def extraer_datos_con_gemini(imagenes_pil):
     try:
         response = model.generate_content(prompt_parts)
         
-        # MEJORA: Usar regex para encontrar el bloque JSON de forma más robusta
         match = re.search(r'\{.*\}', response.text, re.DOTALL)
         
         if match:
             json_text = match.group(0)
             return json.loads(json_text)
         else:
-            # Si no se encuentra JSON, es un mensaje de la IA (ej. imagen borrosa)
             st.warning("La IA no pudo procesar la imagen y respondió con un mensaje:")
             st.info(response.text)
-            return {"Error": "La IA no pudo extraer datos. Intenta con una foto más nítida."}
+            return {"Error": "La IA no pudo extraer datos. Intenta con una foto más nítida.", "es_cedula_colombiana": False}
             
     except json.JSONDecodeError:
         st.error("La respuesta de la IA no tuvo un formato JSON válido.")
         st.text("Respuesta cruda de la API:")
         st.text(response.text)
-        return {"Error": "Respuesta inválida de la IA."}
+        return {"Error": "Respuesta inválida de la IA.", "es_cedula_colombiana": False}
 
     except Exception as e:
         st.error(f"Error al contactar la API de Gemini: {e}")
-        return {"Error": "No se pudo procesar la respuesta de la IA."}
+        return {"Error": "No se pudo procesar la respuesta de la IA.", "es_cedula_colombiana": False}
 
 # --- INTERFAZ DE STREAMLIT ---
 st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
@@ -202,20 +202,23 @@ if foto_anverso_buffer:
         with st.spinner('La IA está analizando los documentos...'):
             datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
         
-        st.subheader("Resultado del Análisis de IA")
-        st.json(datos_estructurados)
-        
-        st.session_state.ultimo_dato = datos_estructurados
+        # --- LÓGICA DE VALIDACIÓN ---
+        if datos_estructurados.get("es_cedula_colombiana"):
+            st.subheader("Resultado del Análisis de IA")
+            st.json(datos_estructurados)
+            st.session_state.ultimo_dato = datos_estructurados
 
-        # --- Botones de Acción ---
-        action_col1, action_col2 = st.columns(2)
-        with action_col1:
-            if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
-                st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
-                st.success("¡Datos añadidos!")
-                # No se resetea aquí, para que el usuario pueda ver los datos.
-        
-        with action_col2:
+            action_col1, action_col2 = st.columns(2)
+            with action_col1:
+                if "Error" not in datos_estructurados and st.button("Confirmar y Añadir a la Lista"):
+                    st.session_state.datos_capturados.append(st.session_state.ultimo_dato)
+                    st.success("¡Datos añadidos!")
+            
+            with action_col2:
+                st.button("📸 Leer Nuevo Documento", on_click=reset_scan)
+        else:
+            st.error("EL DOCUMENTO ANALIZADO NO PARECE SER UNA CÉDULA DE CIUDADANÍA DE COLOMBIA.")
+            st.json(datos_estructurados) # Muestra el resultado para depuración
             st.button("📸 Leer Nuevo Documento", on_click=reset_scan)
             
     else:
