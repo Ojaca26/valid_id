@@ -266,3 +266,4 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
