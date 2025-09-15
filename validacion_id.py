@@ -7,6 +7,7 @@ import io
 import google.generativeai as genai
 import json
 import re
+import face_recognition
 
 # --- CONFIGURACIÓN ---
 ARCHIVO_EXCEL = 'datos_cedulas_colombia.xlsx'
@@ -120,116 +121,139 @@ def extraer_datos_con_gemini(imagenes_pil):
         st.error(f"Error al contactar o procesar la respuesta de la API de Gemini: {e}")
         return {"Error": "Fallo en la comunicación con la IA.", "es_cedula_colombiana": False}
 
+def comparar_rostros(img_cedula_pil, img_selfie_pil):
+    """Compara los rostros en dos imágenes y devuelve si coinciden."""
+    try:
+        img_cedula_np = np.array(img_cedula_pil)
+        img_selfie_np = np.array(img_selfie_pil)
+
+        # Obtener los encodings (características faciales) de cada imagen
+        cedula_encodings = face_recognition.face_encodings(img_cedula_np)
+        selfie_encodings = face_recognition.face_encodings(img_selfie_np)
+
+        if not cedula_encodings:
+            return "No se encontró un rostro en la foto de la cédula.", False
+        if not selfie_encodings:
+            return "No se encontró un rostro en la selfie.", False
+        
+        # Comparar el primer rostro encontrado en cada imagen
+        # El valor de tolerance (0.6 por defecto) indica qué tan estricta es la comparación
+        coincide = face_recognition.compare_faces([cedula_encodings[0]], selfie_encodings[0], tolerance=0.6)
+        
+        if coincide[0]:
+            return "✅ Verificación Exitosa: Los rostros coinciden.", True
+        else:
+            return "❌ Verificación Fallida: Los rostros no coinciden.", False
+
+    except Exception as e:
+        return f"Ocurrió un error durante la comparación facial: {e}", False
+
+
 # --- INTERFAZ DE STREAMLIT ---
-st.set_page_config(page_title="Lector de Cédulas IA", layout="wide")
-st.title("🚀 Lector de Cédulas con IA")
+st.set_page_config(page_title="Verificación de Identidad IA", layout="wide")
+st.title("🚀 Verificación de Identidad con IA (Gemini)")
 
 # --- GESTIÓN DE ESTADO ---
 if 'stage' not in st.session_state:
     st.session_state.stage = 'inicio'
 if 'datos_capturados' not in st.session_state:
     st.session_state.datos_capturados = []
-if 'anverso_buffer' not in st.session_state:
-    st.session_state.anverso_buffer = None
-if 'reverso_buffer' not in st.session_state:
-    st.session_state.reverso_buffer = None
+# ... otros estados ...
+if 'anverso_buffer' not in st.session_state: st.session_state.anverso_buffer = None
+if 'reverso_buffer' not in st.session_state: st.session_state.reverso_buffer = None
+if 'selfie_buffer' not in st.session_state: st.session_state.selfie_buffer = None
+if 'cedula_corregida' not in st.session_state: st.session_state.cedula_corregida = None
 
 def limpiar_y_empezar_de_nuevo():
     st.session_state.stage = 'inicio'
     st.session_state.anverso_buffer = None
     st.session_state.reverso_buffer = None
+    st.session_state.selfie_buffer = None
+    st.session_state.cedula_corregida = None
 
-st.info("Puedes tomar una foto en vivo o subir una imagen desde tu galería para mayor precisión.")
 
-tab1, tab2 = st.tabs(["📸 Tomar Foto (Secuencial)", "⬆️ Subir Foto (Múltiple)"])
+# --- PESTAÑAS DE ENTRADA ---
+st.info("Paso 1: Proporciona la imagen de la cédula.")
+tab1, tab2 = st.tabs(["📸 Tomar Foto", "⬆️ Subir Foto"])
 
-# --- Lógica de la Pestaña 1: Tomar Foto ---
-with tab1:
-    st.write("Sigue los pasos para capturar las imágenes. Solo se activa una cámara a la vez.")
-    
-    # Etapa 1: Capturar Anverso
-    if st.session_state.stage == 'inicio':
-        foto_anverso_cam = st.camera_input("Paso 1: Toma una foto del **Anverso**", key="cam_anverso")
-        if foto_anverso_cam:
-            st.session_state.anverso_buffer = foto_anverso_cam
-            st.session_state.stage = 'anverso_listo'
+# Lógica para capturar o subir la cédula (solo si estamos al inicio)
+if st.session_state.stage == 'inicio':
+    with tab1:
+        anverso_cam = st.camera_input("Toma una foto del **Anverso**", key="cam_anverso")
+        if anverso_cam:
+            st.session_state.anverso_buffer = anverso_cam
+            st.session_state.stage = 'procesar_cedula'
+            st.rerun()
+    with tab2:
+        anverso_up = st.file_uploader("Sube una foto del **Anverso**", type=['jpg', 'jpeg', 'png'], key="up_anverso")
+        if anverso_up:
+            st.session_state.anverso_buffer = anverso_up
+            st.session_state.stage = 'procesar_cedula'
             st.rerun()
 
-    # Etapa 2: Capturar Reverso
-    elif st.session_state.stage == 'anverso_listo':
-        st.success("✔️ Paso 1: Anverso capturado.")
-        st.image(st.session_state.anverso_buffer)
-        foto_reverso_cam = st.camera_input("Paso 2: Toma una foto del **Reverso** (opcional)", key="cam_reverso")
-        if foto_reverso_cam:
-            st.session_state.reverso_buffer = foto_reverso_cam
-            st.session_state.stage = 'listo_para_procesar'
-            st.rerun()
-        
-        # Botón para procesar solo con el anverso
-        if st.button("Procesar solo con Anverso"):
-            st.session_state.stage = 'listo_para_procesar'
-            st.rerun()
-
-# --- Lógica de la Pestaña 2: Subir Foto ---
-with tab2:
-    st.write("Sube imágenes desde tu dispositivo para obtener la máxima calidad.")
-    up_col1, up_col2 = st.columns(2)
-    anverso_up = up_col1.file_uploader("1. Anverso (lado principal)", type=['jpg', 'jpeg', 'png'], key="up_anverso")
-    reverso_up = up_col2.file_uploader("2. Reverso (opcional)", type=['jpg', 'jpeg', 'png'], key="up_reverso")
+# --- ETAPA DE PROCESAMIENTO DE CÉDULA ---
+if st.session_state.stage == 'procesar_cedula':
+    st.info("Procesando Cédula...")
+    img_anverso_pil = Image.open(st.session_state.anverso_buffer)
+    st.session_state.cedula_corregida = corregir_perspectiva(img_anverso_pil)
     
-    if anverso_up:
-        # Si se sube un archivo, sobreescribe el estado de la cámara y procesa
-        st.session_state.anverso_buffer = anverso_up
-        st.session_state.reverso_buffer = reverso_up
-        st.session_state.stage = 'listo_para_procesar'
-
-
-# --- Lógica de Procesamiento Centralizada ---
-if st.session_state.stage == 'listo_para_procesar':
-    st.info("Procesando imagen(es)...")
-    imagenes_a_procesar = []
+    with st.spinner('La IA está analizando la cédula...'):
+        st.session_state.datos_cedula = extraer_datos_con_gemini([st.session_state.cedula_corregida])
     
-    if st.session_state.anverso_buffer:
-        img_anverso_pil = Image.open(st.session_state.anverso_buffer)
-        img_anverso_corregida = corregir_perspectiva(img_anverso_pil)
-        imagenes_a_procesar.append(img_anverso_corregida)
+    st.session_state.stage = 'mostrar_resultados_cedula'
+    st.rerun()
 
-    if st.session_state.reverso_buffer:
-        img_reverso_pil = Image.open(st.session_state.reverso_buffer)
-        img_reverso_corregida = corregir_perspectiva(img_reverso_pil)
-        imagenes_a_procesar.append(img_reverso_corregida)
-    
-    if GEMINI_CONFIGURADO and imagenes_a_procesar:
-        with st.spinner('La IA está analizando los documentos...'):
-            datos_estructurados = extraer_datos_con_gemini(imagenes_a_procesar)
-        
-        st.session_state.ultimo_dato = datos_estructurados
-        st.session_state.stage = 'resultados_listos' # Transición a la etapa de resultados
-        st.rerun()
-
-# --- Mostrar Resultados y Acciones ---
-if st.session_state.stage == 'resultados_listos':
-    datos = st.session_state.get('ultimo_dato', {})
+# --- ETAPA DE RESULTADOS DE CÉDULA Y VERIFICACIÓN FACIAL ---
+if st.session_state.stage == 'mostrar_resultados_cedula':
+    datos = st.session_state.get('datos_cedula', {})
     
     if datos.get("es_cedula_colombiana"):
-        st.subheader("Resultado del Análisis de IA")
+        st.subheader("Paso 1: Datos Extraídos de la Cédula")
         st.json(datos)
         
-        if st.button("Confirmar y Añadir a la Lista"):
-            st.session_state.datos_capturados.append(datos)
-            st.success("¡Datos añadidos!")
-            limpiar_y_empezar_de_nuevo()
+        st.info("Paso 2: Verificación Facial - Compara el rostro con la foto de la cédula.")
+        selfie_cam = st.camera_input("Toma una selfie para la comparación", key="cam_selfie")
+        
+        if selfie_cam:
+            st.session_state.selfie_buffer = selfie_cam
+            st.session_state.stage = 'procesar_selfie'
             st.rerun()
     else:
         st.error("EL DOCUMENTO ANALIZADO NO PARECE SER UNA CÉDULA DE CIUDADANÍA DE COLOMBIA.")
-        if "Error" in datos:
-            st.json(datos)
+        st.button("Empezar de Nuevo", on_click=limpiar_y_empezar_de_nuevo)
+
+# --- ETAPA DE PROCESAMIENTO DE SELFIE Y COMPARACIÓN ---
+if st.session_state.stage == 'procesar_selfie':
+    st.subheader("Paso 2: Verificación Facial - Resultados")
     
-    st.button("Limpiar y Empezar de Nuevo", on_click=limpiar_y_empezar_de_nuevo)
+    col_cedula, col_selfie = st.columns(2)
+    with col_cedula:
+        st.image(st.session_state.cedula_corregida, caption="Imagen de la Cédula", use_container_width=True)
+    with col_selfie:
+        st.image(st.session_state.selfie_buffer, caption="Selfie Capturada", use_container_width=True)
+
+    with st.spinner("Comparando rostros..."):
+        mensaje, exito = comparar_rostros(st.session_state.cedula_corregida, Image.open(st.session_state.selfie_buffer))
+    
+    if exito:
+        st.success(mensaje)
+        st.balloons()
+        if st.button("Confirmar y Guardar Registro"):
+            registro_final = st.session_state.datos_cedula
+            registro_final["verificacion_facial"] = "Exitosa"
+            st.session_state.datos_capturados.append(registro_final)
+            st.success("¡Registro guardado!")
+            limpiar_y_empezar_de_nuevo()
+            st.rerun()
+    else:
+        st.error(mensaje)
+
+    st.button("Intentar de Nuevo", on_click=limpiar_y_empezar_de_nuevo)
+
 
 # --- Mostrar la tabla de registros ---
 if st.session_state.datos_capturados:
-    st.subheader("Registros Capturados")
+    st.subheader("Registros Verificados")
     df = pd.DataFrame(st.session_state.datos_capturados)
     st.dataframe(df)
 
@@ -242,4 +266,3 @@ if st.session_state.datos_capturados:
         label="📥 Descargar todo como Excel", data=excel_data,
         file_name=ARCHIVO_EXCEL, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
