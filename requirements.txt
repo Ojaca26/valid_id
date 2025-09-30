@@ -5,3 +5,5 @@ Pillow
 openpyxl
 numpy
 google-generativeai
+dlib
+face_recognition
